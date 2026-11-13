@@ -4,11 +4,17 @@ import json
 import sqlite3
 from typing import Any
 
+_BATCH_COLUMNS = (
+    "id, dataset_id, rule_pack_id, status, scanned_count, passed_count, failed_count, "
+    "quarantined_count, released_count, report_json, created_at"
+)
+
 
 def insert_batch(
     conn: sqlite3.Connection,
     *,
     dataset_id: int,
+    rule_pack_id: int,
     status: str,
     scanned: int,
     passed: int,
@@ -21,12 +27,13 @@ def insert_batch(
     cur = conn.execute(
         """
         INSERT INTO inspect_batches(
-          dataset_id, status, scanned_count, passed_count, failed_count,
+          dataset_id, rule_pack_id, status, scanned_count, passed_count, failed_count,
           quarantined_count, released_count, report_json, created_at
-        ) VALUES (?,?,?,?,?,?,?,?,?)
+        ) VALUES (?,?,?,?,?,?,?,?,?,?)
         """,
         (
             dataset_id,
+            rule_pack_id,
             status,
             scanned,
             passed,
@@ -68,9 +75,8 @@ def insert_row(
 
 def list_batches(conn: sqlite3.Connection, limit: int = 50) -> list[dict[str, Any]]:
     rows = conn.execute(
-        """
-        SELECT id, dataset_id, status, scanned_count, passed_count, failed_count,
-               quarantined_count, released_count, report_json, created_at
+        f"""
+        SELECT {_BATCH_COLUMNS}
         FROM inspect_batches ORDER BY id DESC LIMIT ?
         """,
         (limit,),
@@ -85,9 +91,8 @@ def list_batches(conn: sqlite3.Connection, limit: int = 50) -> list[dict[str, An
 
 def get_batch(conn: sqlite3.Connection, batch_id: int) -> dict[str, Any] | None:
     row = conn.execute(
-        """
-        SELECT id, dataset_id, status, scanned_count, passed_count, failed_count,
-               quarantined_count, released_count, report_json, created_at
+        f"""
+        SELECT {_BATCH_COLUMNS}
         FROM inspect_batches WHERE id=?
         """,
         (batch_id,),

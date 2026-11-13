@@ -11,11 +11,11 @@ from app.repositories import batches as batch_repo
 from app.repositories import curated as curated_repo
 from app.repositories import datasets as dataset_repo
 from app.repositories import quarantine as quarantine_repo
-from app.repositories import rules as rules_repo
+from app.repositories import rule_packs as rule_pack_repo
 from app.seed import _now
 
 
-def run_inspect(dataset_id: int) -> dict[str, Any]:
+def run_inspect(dataset_id: int, rule_pack_id: int) -> dict[str, Any]:
     conn = connect()
     try:
         ds = dataset_repo.get_dataset(conn, dataset_id)
@@ -24,17 +24,23 @@ def run_inspect(dataset_id: int) -> dict[str, Any]:
         if not ds["enabled"]:
             raise ValueError(f"dataset {dataset_id} disabled")
 
+        # 入检必须显式绑定一个已发布、且属于该数据集的规则包版本
+        bound = rule_pack_repo.get_pack_for_inspect(conn, rule_pack_id, dataset_id)
+        if bound is None:
+            raise ValueError(
+                f"rule_pack {rule_pack_id} 不存在或不属于数据集 {dataset_id}，未绑定已发布版本不得入检"
+            )
+        pack, rules = bound
+
         path = FIXTURES_DIR / ds["fixture_path"]
         rows = parse_jsonl(path)
-        rules = [r for r in rules_repo.list_rules(conn, dataset_id) if r.get("enabled")]
 
         scanned = len(rows)
         passed = failed = quarantined = released = 0
         row_results: list[dict[str, Any]] = []
         now = _now()
 
-        # pre-insert batch shell with zeros; update via rewrite after we know counts
-        # simpler: compute in memory then insert once
+        # 评估只用规则包快照，与 rules 表当前草稿状态无关
         for idx, payload in enumerate(rows, start=1):
             hits = evaluate_row(payload, rules)
             disposition = decide_disposition(hits)
@@ -62,12 +68,21 @@ def run_inspect(dataset_id: int) -> dict[str, Any]:
             }
         ]
 
-        # insert batch first to get id, then rows / quarantine / curated
+        # 批次报告内嵌绑定版本与快照清单，批次详情可回看当时规则
+        snapshot_rules = rule_pack_repo.list_snapshot_rules(conn, pack["id"])
         report = {
             "dataset_id": dataset_id,
             "dataset_name": ds["name"],
             "fixture_path": ds["fixture_path"],
+            "rule_pack": {
+                "id": pack["id"],
+                "version": pack["version"],
+                "note": pack["note"],
+                "rule_count": pack["rule_count"],
+                "created_at": pack["created_at"],
+            },
             "rule_count": len(rules),
+            "snapshot_rules": snapshot_rules,
             "counts": {
                 "scanned": scanned,
                 "passed": passed,
@@ -80,6 +95,7 @@ def run_inspect(dataset_id: int) -> dict[str, Any]:
         batch_id = batch_repo.insert_batch(
             conn,
             dataset_id=dataset_id,
+            rule_pack_id=pack["id"],
             status="inspected",
             scanned=scanned,
             passed=passed,
@@ -155,6 +171,8 @@ def run_inspect(dataset_id: int) -> dict[str, Any]:
         detail = batch_repo.get_batch(conn, batch_id)
         assert detail is not None
         detail["rows"] = batch_repo.list_batch_rows(conn, batch_id)
+        detail["rule_pack"] = rule_pack_repo.get_pack(conn, pack["id"])
+        detail["snapshot_rules"] = snapshot_rules
         detail["curated_total"] = curated_repo.count_all(conn, dataset_id)
         detail["quarantine_total"] = quarantine_repo.count_all(conn)
         return detail

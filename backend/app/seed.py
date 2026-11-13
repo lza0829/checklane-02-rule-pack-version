@@ -2,10 +2,15 @@ from datetime import datetime, timezone
 
 from app.config import DATA_DIR
 from app.db import connect
+from app.repositories import rule_packs as rule_pack_repo
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _column_names(conn, table: str) -> set[str]:
+    return {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
 
 
 def init_db() -> None:
@@ -36,9 +41,31 @@ def init_db() -> None:
           enabled INTEGER NOT NULL DEFAULT 1,
           FOREIGN KEY(dataset_id) REFERENCES datasets(id)
         );
+        CREATE TABLE IF NOT EXISTS rule_packs(
+          id INTEGER PRIMARY KEY,
+          dataset_id INTEGER NOT NULL,
+          version INTEGER NOT NULL,
+          note TEXT,
+          rule_count INTEGER NOT NULL,
+          created_at TEXT NOT NULL,
+          UNIQUE(dataset_id, version),
+          FOREIGN KEY(dataset_id) REFERENCES datasets(id)
+        );
+        CREATE TABLE IF NOT EXISTS rule_pack_snapshots(
+          id INTEGER PRIMARY KEY,
+          pack_id INTEGER NOT NULL,
+          source_rule_id INTEGER NOT NULL,
+          name TEXT NOT NULL,
+          field TEXT NOT NULL,
+          rule_type TEXT NOT NULL,
+          severity TEXT NOT NULL,
+          params_json TEXT NOT NULL,
+          FOREIGN KEY(pack_id) REFERENCES rule_packs(id)
+        );
         CREATE TABLE IF NOT EXISTS inspect_batches(
           id INTEGER PRIMARY KEY,
           dataset_id INTEGER NOT NULL,
+          rule_pack_id INTEGER,
           status TEXT NOT NULL,
           scanned_count INTEGER NOT NULL DEFAULT 0,
           passed_count INTEGER NOT NULL DEFAULT 0,
@@ -47,7 +74,8 @@ def init_db() -> None:
           released_count INTEGER NOT NULL DEFAULT 0,
           report_json TEXT NOT NULL,
           created_at TEXT NOT NULL,
-          FOREIGN KEY(dataset_id) REFERENCES datasets(id)
+          FOREIGN KEY(dataset_id) REFERENCES datasets(id),
+          FOREIGN KEY(rule_pack_id) REFERENCES rule_packs(id)
         );
         CREATE TABLE IF NOT EXISTS inspect_rows(
           id INTEGER PRIMARY KEY,
@@ -80,6 +108,10 @@ def init_db() -> None:
         );
         """
     )
+    # 迁移：老库的 inspect_batches 没有 rule_pack_id 列，补列并允许历史批次为空
+    if "rule_pack_id" not in _column_names(conn, "inspect_batches"):
+        conn.execute("ALTER TABLE inspect_batches ADD COLUMN rule_pack_id INTEGER")
+
     n = conn.execute("SELECT COUNT(*) AS c FROM datasets").fetchone()["c"]
     if n == 0:
         conn.execute(
@@ -104,5 +136,15 @@ def init_db() -> None:
             "INSERT INTO settings(key, value) VALUES (?, ?)",
             ("release_mode", "pass_only"),
         )
+
+    # 任何没有已发布规则包的数据集（含老库迁移进来的）补一个不可变 v1 快照；
+    # 已有版本的数据集不动，保证历史包不被改写
+    for ds_row in conn.execute("SELECT id FROM datasets ORDER BY id").fetchall():
+        ds_id = ds_row["id"]
+        has_pack = conn.execute(
+            "SELECT 1 FROM rule_packs WHERE dataset_id=? LIMIT 1", (ds_id,)
+        ).fetchone()
+        if not has_pack:
+            rule_pack_repo.create_pack(conn, dataset_id=ds_id, note="初始规则包", now=_now())
     conn.commit()
     conn.close()

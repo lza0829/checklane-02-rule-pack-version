@@ -9,7 +9,7 @@ router = APIRouter(tags=["inspect"])
 @router.post("/inspect")
 def inspect(body: InspectRequest):
     try:
-        return run_inspect(body.dataset_id)
+        return run_inspect(body.dataset_id, body.rule_pack_id)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     except FileNotFoundError as exc:
